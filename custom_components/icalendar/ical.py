@@ -79,8 +79,6 @@ def event_from_ha(entity_id: str, event: dict[str, Any]) -> Event | None:
             start.isoformat(),
             end.isoformat(),
             summary,
-            str(description or ""),
-            str(location or ""),
         )
     )
 

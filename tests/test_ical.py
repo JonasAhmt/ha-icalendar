@@ -19,9 +19,14 @@ def test_offset_events_use_stable_uids_and_utc() -> None:
     }
 
     event = event_from_ha("calendar.school", payload)
+    updated_event = event_from_ha(
+        "calendar.school", {**payload, "description": "Room 3", "location": "Gym"}
+    )
 
     assert event is not None
+    assert updated_event is not None
     assert event.uid == event_from_ha("calendar.school", payload).uid
+    assert event.uid == updated_event.uid
     assert event.dtstart == datetime(2026, 9, 1, 6, 0, tzinfo=timezone.utc)
     assert "DTSTART:20260901T060000Z" in IcsCalendarStream.calendar_to_ics(
         Calendar(events=[event])
