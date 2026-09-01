@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date, datetime
+import hashlib
 import re
+from collections.abc import Mapping
+from datetime import date, datetime, timezone
 from typing import Any
 
-from ical.calendar import Calendar
-from ical.calendar_stream import IcsCalendarStream
-from ical.event import Event
 from homeassistant.components import frontend
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from ical.calendar import Calendar
+from ical.calendar_stream import IcsCalendarStream
+from ical.event import Event
 
 
 def build_icalendar(
@@ -29,7 +30,7 @@ def build_icalendar(
     calendar.method = "PUBLISH"
 
     for ha_event in events:
-        if event := event_from_ha(ha_event):
+        if event := event_from_ha(entity_id, ha_event):
             calendar.events.append(event)
 
     output = IcsCalendarStream.calendar_to_ics(calendar)
@@ -56,7 +57,7 @@ def inject_calendar_metadata(ics: str, calendar_name: str, calendar_color: str |
     return "\r\n".join(injected) + "\r\n"
 
 
-def event_from_ha(event: dict[str, Any]) -> Event | None:
+def event_from_ha(entity_id: str, event: dict[str, Any]) -> Event | None:
     """Convert Home Assistant event payload to an ical.Event."""
     try:
         start = parse_ha_datetime_or_date(event["start"])
@@ -64,12 +65,30 @@ def event_from_ha(event: dict[str, Any]) -> Event | None:
     except (KeyError, ValueError, TypeError):
         return None
 
+    if isinstance(start, datetime) and start.tzinfo:
+        start = start.astimezone(timezone.utc)
+    if isinstance(end, datetime) and end.tzinfo:
+        end = end.astimezone(timezone.utc)
+
+    summary = str(event.get("summary") or "")
+    description = event.get("description")
+    location = event.get("location")
+    uid = "\x1f".join(
+        (
+            entity_id,
+            start.isoformat(),
+            end.isoformat(),
+            summary,
+        )
+    )
+
     return Event(
-        summary=str(event.get("summary") or ""),
+        uid=hashlib.sha256(uid.encode()).hexdigest(),
+        summary=summary,
         start=start,
         end=end,
-        description=event.get("description"),
-        location=event.get("location"),
+        description=description,
+        location=location,
     )
 
 
