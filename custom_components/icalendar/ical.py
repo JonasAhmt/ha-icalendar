@@ -42,11 +42,13 @@ def build_icalendar(
 
 
 def inject_calendar_metadata(ics: str, calendar_name: str, calendar_color: str | None) -> str:
-    """Inject NAME/X-WR-CALNAME/COLOR in VCALENDAR headers."""
+    """Normalize all-day values and inject calendar metadata."""
     lines = ics.splitlines()
     injected: list[str] = []
     inserted = False
     for line in lines:
+        if re.fullmatch(r"(?:DTSTART|DTEND):\d{8}", line):
+            line = line.replace(":", ";VALUE=DATE:", 1)
         injected.append(line)
         if not inserted and line == "METHOD:PUBLISH":
             injected.append(f"NAME:{calendar_name}")
