@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from ical.calendar import Calendar
 from ical.calendar_stream import IcsCalendarStream
 
-from custom_components.icalendar.ical import event_from_ha
+from custom_components.icalendar.ical import event_from_ha, inject_calendar_metadata
 
 
 def test_offset_events_use_stable_uids_and_utc() -> None:
@@ -43,3 +43,8 @@ def test_all_day_events_keep_dates_and_stable_uids() -> None:
     assert event.dtstart == date(2026, 9, 1)
     assert event.dtend == date(2026, 9, 2)
     assert event.uid == event_from_ha("calendar.birthdays", payload).uid
+    ics = inject_calendar_metadata(
+        IcsCalendarStream.calendar_to_ics(Calendar(events=[event])), "Birthdays", None
+    )
+    assert "DTSTART;VALUE=DATE:20260901" in ics
+    assert "DTEND;VALUE=DATE:20260902" in ics
