@@ -7,21 +7,22 @@
     },
     "error": {
       "invalid_secret": "Secret must be at least 20 characters.",
-      "entity_not_found": "Selected calendar entity is unavailable. Ensure it is loaded and try again."
+      "entity_not_found": "Selected entity is unavailable. Ensure it is loaded and try again.",
+      "entity_not_supported": "Select a calendar or an Aula sensor with week-plan attributes."
     },
     "step": {
       "user": {
         "title": "Add iCalendar feed",
-        "description": "Create a secure iCalendar URL for a Home Assistant calendar entity.",
+        "description": "Create a secure iCalendar URL for a Home Assistant calendar or Aula week-plan sensor.",
         "data": {
-          "calendar_entity_id": "Calendar entity"
+          "calendar_entity_id": "Calendar or Aula week-plan sensor"
         }
       },
       "reconfigure": {
         "title": "Reconfigure iCalendar feed",
         "description": "{url_block}\n\nLeave secret key empty to keep the existing one.",
         "data": {
-          "calendar_entity_id": "Calendar entity",
+          "calendar_entity_id": "Calendar or Aula week-plan sensor",
           "secret": "New secret key (optional; minimum 20 chars)"
         }
       }

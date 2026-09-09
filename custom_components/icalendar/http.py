@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from http import HTTPStatus
 import hmac
+from http import HTTPStatus
 from typing import Any
 
 from aiohttp import web
-
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .const import CONTENT_TYPE_ICAL, DOMAIN, URL_PATH_PREFIX
-from .ical import build_icalendar
+from .ical import aula_weekplan_events, build_icalendar, is_supported_source
 from .models import ICalendarRuntimeData
 
 
@@ -43,23 +42,28 @@ class ICalendarView(HomeAssistantView):
             return web.Response(body="401: Unauthorized", status=HTTPStatus.UNAUTHORIZED)
 
         entity_id = runtime_data.calendar_entity_id
-        if not entity_id.startswith("calendar."):
-            return web.Response(body="403: Forbidden", status=HTTPStatus.FORBIDDEN)
-
         state = self.hass.states.get(entity_id)
         if state is None:
             return web.Response(body="404: Not Found", status=HTTPStatus.NOT_FOUND)
+        if not is_supported_source(entity_id, state.attributes):
+            return web.Response(body="403: Forbidden", status=HTTPStatus.FORBIDDEN)
 
-        events = await self._fetch_events(entity_id)
+        if entity_id.startswith("calendar."):
+            events = await self._fetch_events(entity_id)
+            calendar_name = state.name
+        else:
+            events = aula_weekplan_events(state.attributes)
+            calendar_name = f"Ugeplan {state.name}"
         if events is None:
             return web.Response(body="404: Not Found", status=HTTPStatus.NOT_FOUND)
 
-        feed = build_icalendar(self.hass, entity_id, state.name, events)
+        feed = build_icalendar(self.hass, entity_id, calendar_name, events)
         return web.Response(body=feed, content_type=CONTENT_TYPE_ICAL, charset="utf-8")
 
     async def _fetch_events(self, entity_id: str) -> list[dict[str, Any]] | None:
         """Fetch events from Home Assistant calendar service."""
         from datetime import datetime, timedelta, timezone
+
         from .const import DEFAULT_FUTURE_WEEKS, DEFAULT_HISTORY_WEEKS
 
         start = datetime.now(timezone.utc) - timedelta(weeks=DEFAULT_HISTORY_WEEKS)
