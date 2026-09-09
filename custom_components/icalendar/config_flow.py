@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import secrets
+from collections.abc import Mapping
+from contextlib import suppress
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.config_entries import SOURCE_USER, FlowType
 from homeassistant.core import HomeAssistant
@@ -19,6 +19,7 @@ from .const import (
     NAME,
     URL_PATH_PREFIX,
 )
+from .ical import is_supported_source
 
 
 def _generate_secret() -> str:
@@ -37,6 +38,11 @@ def _build_feed_urls(hass: HomeAssistant, entry_id: str, secret: str) -> tuple[s
 
     local_base = hass.config.internal_url or ""
     external_base = hass.config.external_url or ""
+    if not external_base:
+        from homeassistant.components import cloud
+
+        with suppress(cloud.CloudNotAvailable):
+            external_base = cloud.async_remote_ui_url(hass)
 
     local_url = f"{local_base}{path}" if local_base else ""
     external_url = f"{external_base}{path}" if external_base else ""
@@ -79,14 +85,14 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             entity_id = user_input[CONF_CALENDAR_ENTITY_ID]
-            if self.hass.states.get(entity_id) is None:
+            if error := _source_error(self.hass, entity_id):
                 return self.async_show_form(
                     step_id="user",
                     data_schema=_build_user_schema(user_input),
-                    errors={CONF_CALENDAR_ENTITY_ID: "entity_not_found"},
+                    errors={CONF_CALENDAR_ENTITY_ID: error},
                 )
 
-            # Prevent duplicate entries for the same calendar entity.
+            # Prevent duplicate entries for the same source entity.
             for entry in self._async_current_entries():
                 if entry.data.get(CONF_CALENDAR_ENTITY_ID) == entity_id:
                     return self.async_abort(reason="already_configured")
@@ -112,11 +118,11 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         local_url, external_url = _build_feed_urls(self.hass, entry.entry_id, existing_secret)
         if user_input is not None:
             selected_entity = user_input[CONF_CALENDAR_ENTITY_ID]
-            if self.hass.states.get(selected_entity) is None:
+            if error := _source_error(self.hass, selected_entity):
                 return self.async_show_form(
                     step_id="reconfigure",
                     data_schema=_build_reconfigure_schema(entry),
-                    errors={CONF_CALENDAR_ENTITY_ID: "entity_not_found"},
+                    errors={CONF_CALENDAR_ENTITY_ID: error},
                     description_placeholders={
                         "url_block": _build_urls_text(local_url, external_url),
                     },
@@ -221,7 +227,9 @@ def _build_user_schema(user_input: Mapping[str, str] | None = None) -> vol.Schem
 
     return vol.Schema(
         {
-            entity_key: selector.EntitySelector(selector.EntitySelectorConfig(domain=["calendar"])),
+            entity_key: selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["calendar", "sensor"])
+            ),
         }
     )
 
@@ -233,7 +241,9 @@ def _build_reconfigure_schema(entry: config_entries.ConfigEntry) -> vol.Schema:
             vol.Required(
                 CONF_CALENDAR_ENTITY_ID,
                 default=entry.data.get(CONF_CALENDAR_ENTITY_ID),
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["calendar"])),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain=["calendar", "sensor"])
+            ),
             vol.Optional(CONF_SECRET, default=entry.data.get(CONF_SECRET, "")): str,
         }
     )
@@ -246,3 +256,13 @@ def _build_options_schema(entry: config_entries.ConfigEntry) -> vol.Schema:
             vol.Optional(CONF_SECRET, default=entry.data.get(CONF_SECRET, "")): str,
         }
     )
+
+
+def _source_error(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Return a config-flow error for an unavailable or unsupported source."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return "entity_not_found"
+    if not is_supported_source(entity_id, state.attributes):
+        return "entity_not_supported"
+    return None

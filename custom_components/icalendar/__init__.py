@@ -9,6 +9,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_CALENDAR_ENTITY_ID, CONF_SECRET, DOMAIN
 from .http import ICalendarView
+from .ical import is_supported_source
 from .models import ICalendarRuntimeData
 
 
@@ -24,8 +25,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up iCalendar from a config entry."""
     entity_id = entry.data[CONF_CALENDAR_ENTITY_ID]
-    if hass.states.get(entity_id) is None:
-        raise ConfigEntryNotReady(f"Calendar entity not ready: {entity_id}")
+    state = hass.states.get(entity_id)
+    if state is None or not is_supported_source(entity_id, state.attributes):
+        raise ConfigEntryNotReady(f"Feed source not ready: {entity_id}")
 
     entry.runtime_data = ICalendarRuntimeData(
         calendar_entity_id=entity_id,
