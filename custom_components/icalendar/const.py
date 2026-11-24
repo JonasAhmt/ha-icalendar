@@ -11,3 +11,9 @@ CONF_SECRET = "secret"
 DEFAULT_HISTORY_WEEKS = 4
 DEFAULT_FUTURE_WEEKS = 52
 URL_PATH_PREFIX = "/api/ics"
+
+CONF_CALENDAR_ENTITY_IDS = "calendar_entity_ids"
+CONF_SELECTION_MODE = "selection_mode"
+CONF_LEGACY_UIDS = "legacy_uids"
+MODE_INCLUDE = "include"
+MODE_EXCLUDE = "exclude"

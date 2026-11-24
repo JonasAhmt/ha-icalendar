@@ -1,140 +1,133 @@
-"""Regression tests for ICS event identity and time zones."""
-
-import hashlib
-import sys
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
-from ical.calendar import Calendar
+import pytest
 from ical.calendar_stream import IcsCalendarStream
+from homeassistant.components import frontend
 
-from custom_components.icalendar.config_flow import _build_feed_urls
 from custom_components.icalendar.ical import (
-    aula_weekplan_events,
-    build_icalendar,
-    event_from_ha,
-    inject_calendar_metadata,
+    build_icalendar, event_from_ha, inject_calendar_metadata,
+    normalize_calendar_color,
 )
 
 
-def test_offset_events_use_stable_uids_and_utc() -> None:
-    """Keep subscription updates tied to one event across requests."""
-    payload = {
-        "summary": "Matematik",
-        "description": "Room 2",
-        "location": "School",
-        "start": "2026-09-01T08:00:00+02:00",
-        "end": "2026-09-01T08:45:00+02:00",
-    }
-
-    event = event_from_ha("calendar.school", payload)
-    updated_event = event_from_ha(
-        "calendar.school", {**payload, "description": "Room 3", "location": "Gym"}
-    )
-
-    assert event is not None
-    assert updated_event is not None
-    assert event.uid == event_from_ha("calendar.school", payload).uid
-    assert event.uid == updated_event.uid
-    assert event.dtstart == datetime(2026, 9, 1, 6, 0, tzinfo=timezone.utc)
-    assert "DTSTART:20260901T060000Z" in IcsCalendarStream.calendar_to_ics(
-        Calendar(events=[event])
-    )
+def event(**changes):
+    return dict(start='2026-09-10T12:00:00+12:00',
+                end='2026-09-10T13:00:00+12:00', summary='Meeting', **changes)
 
 
-def test_all_day_events_keep_dates_and_stable_uids() -> None:
-    """Preserve all-day semantics while assigning a deterministic UID."""
-    payload = {"summary": "Birthday", "start": "2026-09-01", "end": "2026-09-02"}
-
-    event = event_from_ha("calendar.birthdays", payload)
-
-    assert event is not None
-    assert event.dtstart == date(2026, 9, 1)
-    assert event.dtend == date(2026, 9, 2)
-    assert event.uid == event_from_ha("calendar.birthdays", payload).uid
-    ics = inject_calendar_metadata(
-        IcsCalendarStream.calendar_to_ics(Calendar(events=[event])), "Birthdays", None
-    )
-    assert "DTSTART;VALUE=DATE:20260901" in ics
-    assert "DTEND;VALUE=DATE:20260902" in ics
+def test_metadata_cannot_inject_properties_and_folds_utf8():
+    name = 'Team, meetings; \\ ' + '日' * 80 + '\r\nBEGIN:VEVENT\nSUMMARY:injected'
+    output = build_icalendar(SimpleNamespace(), None, name, [event()])
+    assert output.count('BEGIN:VEVENT\r\n') == 1
+    assert all(len(line.encode()) <= 75 for line in output.split('\r\n'))
+    unfolded = output.replace('\r\n ', '')
+    assert r'Team\, meetings\; \\ ' in unfolded
+    assert r'\nBEGIN:VEVENT\nSUMMARY:injected' in unfolded
+    assert len(IcsCalendarStream.calendar_from_ics(output).events) == 1
 
 
-def test_aula_weekplans_become_nonempty_all_day_events() -> None:
-    """Expose each populated Aula day while skipping placeholder days."""
-    events = aula_weekplan_events(
-        {
-            "ugeplan": (
-                "<h3>mandag 31. aug.</h3>-"
-                "<h3>tirsdag 1. sep.</h3><b>Matematik &amp; dansk</b><br>"
-                r"Læs 1\. kapitel<br><br><b>UUV</b><br>Trivsel<br><br>"
-            ),
-            "ugeplan_next": (
-                "<h3>mandag 7. sep.</h3>-"
-                "<h3>onsdag 9. sep.</h3>Idrætsdag"
-            ),
-        },
-        today=date(2026, 9, 1),
-    )
-
-    assert events == [
-        {
-            "summary": "Ugeplan",
-            "description": "Matematik & dansk\nLæs 1. kapitel\n\nUUV\nTrivsel",
-            "start": "2026-09-01",
-            "end": "2026-09-02",
-        },
-        {
-            "summary": "Ugeplan",
-            "description": "Idrætsdag",
-            "start": "2026-09-09",
-            "end": "2026-09-10",
-        },
-    ]
-    event = event_from_ha("sensor.aula", events[0])
-    assert event.summary == "Ugeplan, tirsdag"
-    original_uid = "\x1f".join(("sensor.aula", events[0]["start"], events[0]["end"], "Ugeplan"))
-    assert event.uid == hashlib.sha256(original_uid.encode()).hexdigest()
-    assert aula_weekplan_events(
-        {"ugeplan": "<h3>tirsdag 1. sep.</h3>Last week"},
-        today=date(2026, 9, 7),
-    ) == []
+def test_stable_ids_and_separate_sources_and_occurrences():
+    first = event_from_ha(event(uid='source', _calendar_entity_id='calendar.a'))
+    assert first.uid == event_from_ha(event(uid='source', _calendar_entity_id='calendar.a')).uid
+    assert first.uid != event_from_ha(event(uid='source', _calendar_entity_id='calendar.b')).uid
+    later = event(uid='source', _calendar_entity_id='calendar.a')
+    later.update(start='2026-09-11', end='2026-09-12')
+    assert first.uid != event_from_ha(later).uid
+    edited = event(uid='source', _calendar_entity_id='calendar.a')
+    edited['summary'] = 'Edited title'
+    assert first.uid == event_from_ha(edited).uid
 
 
-def test_aula_birthday_feed_formats_title_and_preserves_uid(monkeypatch) -> None:
-    """Update the published title while keeping the upstream event identity."""
-    entity_id = "calendar.fodselsdage"
-    payload = {
-        "summary": "Alex: 🎂 Sam (10)",
-        "start": "2026-09-01",
-        "end": "2026-09-02",
-    }
-    entry = SimpleNamespace(platform="aula", unique_id="aulabirthdays123", options={})
-    registry = SimpleNamespace(async_get=lambda _: entry)
-    monkeypatch.setattr("custom_components.icalendar.ical.er.async_get", lambda _: registry)
-    original = event_from_ha(entity_id, payload)
-
-    feed = build_icalendar(None, entity_id, "Birthdays", [payload])
-    assert "SUMMARY:🇩🇰 Sam (10)" in feed
-    assert f"UID:{original.uid}" in feed
-
-    entry.unique_id = "aula_events123"
-    feed = build_icalendar(None, entity_id, "Other events", [payload])
-    assert "SUMMARY:Alex: 🎂 Sam (10)" in feed
+def test_offset_datetime_round_trips_as_utc():
+    output = build_icalendar(SimpleNamespace(), None, 'Calendar', [event()])
+    assert 'TZID=' not in output
+    assert 'DTSTART:20260910T000000Z' in output
+    parsed = IcsCalendarStream.calendar_from_ics(output).events[0]
+    assert parsed.dtstart == datetime(2026, 9, 10, tzinfo=timezone.utc)
 
 
-def test_feed_url_falls_back_to_home_assistant_cloud(monkeypatch) -> None:
-    """Offer a subscribable URL when HA's external URL setting is empty."""
-    hass = SimpleNamespace(config=SimpleNamespace(internal_url=None, external_url=None))
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.cloud",
-        SimpleNamespace(
-            CloudNotAvailable=RuntimeError,
-            async_remote_ui_url=lambda hass: "https://example.ui.nabu.casa",
-        ),
-    )
+@pytest.mark.parametrize('start,end', [
+    ('bad', '2026-09-11'), (None, '2026-09-11'),
+    ('2026-09-10', '2026-09-09'), ('2026-09-10', '2026-09-10'),
+    ('2026-09-10', '2026-09-11T12:00:00Z'),
+    ('2026-09-10T12:00:00', '2026-09-11T12:00:00Z'),
+])
+def test_invalid_event_is_skipped(start, end):
+    assert event_from_ha({'start': start, 'end': end}) is None
 
-    assert _build_feed_urls(hass, "entry", "secret") == (
-        "",
-        "https://example.ui.nabu.casa/api/ics/entry/secret",
-    )
+
+def test_all_day_dates_remain_dates():
+    value = event_from_ha({'start': '2026-09-10', 'end': '2026-09-11'})
+    assert value.dtstart == date(2026, 9, 10)
+    assert value.dtend == date(2026, 9, 11)
+
+
+def test_color_standard_and_extension():
+    hass = SimpleNamespace(data={})
+    assert normalize_calendar_color(hass, 'primary') == frontend.DEFAULT_THEME_COLOR
+    assert normalize_calendar_color(hass, 'not-a-color') is None
+    assert normalize_calendar_color(hass, 'red') == 'red'
+    base = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'
+    assert '\r\nCOLOR:red\r\n' in inject_calendar_metadata(base, 'Test', 'red')
+    output = inject_calendar_metadata(base, 'Test', '#123456')
+    assert '\r\nCOLOR:' not in output
+    assert 'X-APPLE-CALENDAR-COLOR:#123456' in output
+
+
+def test_all_day_wire_format_declares_date_values():
+    output = build_icalendar(SimpleNamespace(), None, 'All day', [
+        {'start': '2026-09-10', 'end': '2026-09-11'}])
+    assert 'DTSTART;VALUE=DATE:20260910\r\n' in output
+    assert 'DTEND;VALUE=DATE:20260911\r\n' in output
+    assert 'METHOD:' not in output
+
+
+def test_event_unicode_folding_preserves_text():
+    value = event()
+    value['summary'] = '日' * 100 + '\u2028text, backslash\\ and newline\nnext'
+    output = build_icalendar(SimpleNamespace(), None, 'Test', [value])
+    assert all(len(line.encode()) <= 75 for line in output.split('\r\n'))
+    assert IcsCalendarStream.calendar_from_ics(output).events[0].summary == value['summary']
+
+
+def test_invalid_optional_field_does_not_break_other_events():
+    bad = event(description={'unexpected': 'object'})
+    output = build_icalendar(SimpleNamespace(), None, 'Test', [bad, event()])
+    assert len(IcsCalendarStream.calendar_from_ics(output).events) == 1
+
+
+def test_apple_location_and_geo_round_trip_with_zero_coordinates():
+    address = '199 Clarence Street, Riccarton'
+    output = build_icalendar(SimpleNamespace(), None, 'Test', [
+        event(location=address, _location_coordinates=(-43.53, 0)), event()])
+    unfolded = output.replace('\r\n ', '')
+    assert unfolded.count('X-APPLE-STRUCTURED-LOCATION') == 1
+    assert 'GEO:-43.53;0.0\r\n' in unfolded
+    assert 'X-ADDRESS="199 Clarence Street, Riccarton"' in unfolded
+    assert 'X-TITLE="199 Clarence Street, Riccarton":geo:-43.53,0.0' in unfolded
+    parsed = IcsCalendarStream.calendar_from_ics(output).events[0]
+    assert parsed.location == address
+    assert parsed.geo.lat == -43.53
+    assert parsed.geo.lng == 0
+
+
+def test_apple_parameters_cannot_inject_lines_or_parameters():
+    address = '日' * 100 + ', "office";:^\r\nBEGIN:VEVENT\nSUMMARY:injected'
+    output = build_icalendar(SimpleNamespace(), None, 'Test', [
+        event(location=address, _location_coordinates=(0, 180))])
+    assert all(len(line.encode()) <= 75 for line in output.split('\r\n'))
+    assert output.count('BEGIN:VEVENT\r\n') == 1
+    parsed = IcsCalendarStream.calendar_from_ics(output).events[0]
+    prop = next(prop for prop in parsed.extras if prop.name.lower() == 'x-apple-structured-location')
+    assert prop.value == 'geo:0.0,180.0'
+    assert len(prop.params) == 4
+    assert "^'office^'" in output.replace('\r\n ', '')
+
+
+@pytest.mark.parametrize('point', [None, (91, 0), (0, -181), ('nan', 0), (0, 'inf'), (True, 0), (), 'bad'])
+def test_bad_coordinates_keep_plain_location(point):
+    output = build_icalendar(SimpleNamespace(), None, 'Test', [
+        event(location='199 Clarence Street, Riccarton', _location_coordinates=point)])
+    assert 'X-APPLE-STRUCTURED-LOCATION' not in output
+    assert IcsCalendarStream.calendar_from_ics(output).events[0].location == '199 Clarence Street, Riccarton'

@@ -2,40 +2,76 @@
   "title": "iCalendar API",
   "config": {
     "abort": {
-      "already_configured": "This calendar is already configured.",
+      "already_configured": "This calendar selection is already configured.",
       "reconfigure_successful": "Reconfiguration successful."
     },
     "error": {
-      "invalid_secret": "Secret must be at least 20 characters.",
-      "entity_not_found": "Selected entity is unavailable. Ensure it is loaded and try again.",
-      "entity_not_supported": "Select a calendar or an Aula sensor with week-plan attributes."
+      "invalid_secret": "Secret must be at least 20 characters and contain only ASCII letters, digits, underscores, or hyphens.",
+      "entity_not_found": "The selected calendar or Aula week-plan sensor is unavailable.",
+      "invalid_weekplan_selection": "An Aula week-plan sensor must be the only source in Include mode.",
+      "no_calendars": "Select at least one calendar to include.",
+      "invalid_selection_mode": "Choose include or exclude.",
+      "invalid_geocoding_url": "Enter an HTTP(S) Nominatim search endpoint without credentials, query parameters, or a fragment."
     },
     "step": {
       "user": {
         "title": "Add iCalendar feed",
-        "description": "Create a secure iCalendar URL for a Home Assistant calendar or Aula week-plan sensor.",
+        "description": "Include exports the selected calendars or one Aula week-plan sensor. Exclude exports all calendars except those selected.",
         "data": {
-          "calendar_entity_id": "Calendar or Aula week-plan sensor"
+          "selection_mode": "Selection mode",
+          "calendar_entity_ids": "Sources",
+          "geocoding_url": "Address lookup URL (optional)"
+        },
+        "data_description": {
+          "geocoding_url": "Nominatim-compatible search endpoint. Sends event locations to this provider for Apple Calendar maps. Leave empty to disable. See the documentation for provider requirements."
         }
       },
       "reconfigure": {
         "title": "Reconfigure iCalendar feed",
-        "description": "{url_block}\n\nLeave secret key empty to keep the existing one.",
+        "description": "{url_block}\n\nLeave the secret key empty to keep the existing one. Include exports the selected calendars or one Aula week-plan sensor. Exclude exports all calendars except those selected.",
         "data": {
-          "calendar_entity_id": "Calendar or Aula week-plan sensor",
-          "secret": "New secret key (optional; minimum 20 chars)"
+          "secret": "New secret key (optional; minimum 20 chars)",
+          "selection_mode": "Selection mode",
+          "calendar_entity_ids": "Sources",
+          "geocoding_url": "Address lookup URL (optional)"
+        },
+        "data_description": {
+          "geocoding_url": "Nominatim-compatible search endpoint. Sends event locations to this provider for Apple Calendar maps. Leave empty to disable. See the documentation for provider requirements."
         }
       }
     }
   },
   "options": {
+    "error": {
+      "invalid_secret": "Secret must be at least 20 characters and contain only ASCII letters, digits, underscores, or hyphens.",
+      "entity_not_found": "The selected calendar or Aula week-plan sensor is unavailable.",
+      "invalid_weekplan_selection": "An Aula week-plan sensor must be the only source in Include mode.",
+      "no_calendars": "Select at least one calendar to include.",
+      "invalid_selection_mode": "Choose include or exclude.",
+      "already_configured": "This calendar selection is already configured.",
+      "invalid_geocoding_url": "Enter an HTTP(S) Nominatim search endpoint without credentials, query parameters, or a fragment."
+    },
     "step": {
       "init": {
         "title": "iCalendar feed settings",
-        "description": "{url_block}",
+        "description": "{url_block}\n\nLeave the secret key empty to keep the existing one. Include exports the selected calendars or one Aula week-plan sensor. Exclude exports all calendars except those selected.",
         "data": {
-          "secret": "New secret key (optional; minimum 20 chars)"
+          "secret": "New secret key (optional; minimum 20 chars)",
+          "selection_mode": "Selection mode",
+          "calendar_entity_ids": "Sources",
+          "geocoding_url": "Address lookup URL (optional)"
+        },
+        "data_description": {
+          "geocoding_url": "Nominatim-compatible search endpoint. Sends event locations to this provider for Apple Calendar maps. Leave empty to disable. See the documentation for provider requirements."
         }
+      }
+    }
+  },
+  "selector": {
+    "selection_mode": {
+      "options": {
+        "include": "Include selected sources",
+        "exclude": "Exclude selected calendars"
       }
     }
   }
