@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import secrets
 from collections.abc import Mapping
 from contextlib import suppress
+import re
+import secrets
+from typing import Any
+from urllib.parse import quote, urlsplit
 
 import voluptuous as vol
+
 from homeassistant import config_entries
 from homeassistant.config_entries import SOURCE_USER, FlowType
 from homeassistant.core import HomeAssistant
@@ -14,12 +18,20 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_CALENDAR_ENTITY_ID,
+    CONF_CALENDAR_ENTITY_IDS,
+    CONF_LEGACY_UIDS,
+    CONF_SELECTION_MODE,
+    MODE_INCLUDE,
+    MODE_EXCLUDE,
     CONF_SECRET,
     DOMAIN,
     NAME,
     URL_PATH_PREFIX,
 )
+
 from .ical import is_supported_source
+from .location import CONF_GEOCODING_URL
+from .models import calendar_selection, uses_legacy_uids, weekplan_source
 
 
 def _generate_secret() -> str:
@@ -29,23 +41,23 @@ def _generate_secret() -> str:
 
 def _is_secret_valid(secret: str) -> bool:
     """Validate secret length/strength for URL auth."""
-    return len(secret) >= 20
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{20,}", secret))
 
 
 def _build_feed_urls(hass: HomeAssistant, entry_id: str, secret: str) -> tuple[str, str]:
     """Build local/internal and external URLs where available."""
-    path = f"{URL_PATH_PREFIX}/{entry_id}/{secret}"
+    path = f"{URL_PATH_PREFIX}/{entry_id}/{quote(secret, safe='')}"
 
     local_base = hass.config.internal_url or ""
     external_base = hass.config.external_url or ""
-    if not external_base:
+    if not external_base and "cloud" in hass.config.components:
         from homeassistant.components import cloud
 
         with suppress(cloud.CloudNotAvailable):
-            external_base = cloud.async_remote_ui_url(hass)
+            external_base = cloud.async_remote_ui_url(hass) or ""
 
-    local_url = f"{local_base}{path}" if local_base else ""
-    external_url = f"{external_base}{path}" if external_base else ""
+    local_url = f"{local_base.rstrip('/')}{path}" if local_base else ""
+    external_url = f"{external_base.rstrip('/')}{path}" if external_base else ""
 
     return local_url, external_url
 
@@ -60,9 +72,59 @@ def _build_urls_text(local_url: str, external_url: str) -> str:
     return "\n".join(lines)
 
 
-def _title_for_entity(entity_id: str) -> str:
-    """Build config entry title."""
-    return f"{NAME} ({entity_id})"
+def _title_for_selection(mode: str, entity_ids: list[str]) -> str:
+    """Build a title describing the feed selection."""
+    return f"{NAME} ({mode}: {', '.join(entity_ids) or 'none'})"
+
+
+def _selection_errors(
+    hass: HomeAssistant,
+    data: Mapping[str, Any],
+    existing: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    endpoint = data.get(CONF_GEOCODING_URL, "")
+    try:
+        parsed = urlsplit(endpoint)
+        if endpoint and (parsed.scheme not in ("http", "https") or not parsed.hostname
+                         or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return {CONF_GEOCODING_URL: "invalid_geocoding_url"}
+    except ValueError:
+        return {CONF_GEOCODING_URL: "invalid_geocoding_url"}
+    mode, entities = calendar_selection(data)
+    if mode not in (MODE_INCLUDE, MODE_EXCLUDE):
+        return {CONF_SELECTION_MODE: "invalid_selection_mode"}
+    if mode == MODE_INCLUDE and not entities:
+        return {CONF_CALENDAR_ENTITY_IDS: "no_calendars"}
+    weekplan = weekplan_source(mode, entities)
+    if weekplan is None and any(not entity.startswith("calendar.") for entity in entities):
+        return {CONF_CALENDAR_ENTITY_IDS: "invalid_weekplan_selection"}
+    if existing is not None and _same_selection(existing, mode, entities):
+        return {}
+    for entity in entities:
+        state = hass.states.get(entity)
+        if state is None or (entity == weekplan and not is_supported_source(entity, state.attributes)):
+            return {CONF_CALENDAR_ENTITY_IDS: "entity_not_found"}
+    return {}
+
+
+def _same_selection(data: Mapping[str, Any], mode: str, entities: list[str]) -> bool:
+    existing_mode, existing_entities = calendar_selection(data)
+    return existing_mode == mode and set(existing_entities) == set(entities)
+
+
+def _updated_selection(data: Mapping[str, Any], user_input: Mapping[str, Any]) -> dict[str, Any]:
+    """Save selection without changing the UID scheme of an existing feed."""
+    mode, entity_ids = calendar_selection(user_input)
+    updated = {
+        **data,
+        CONF_GEOCODING_URL: user_input.get(CONF_GEOCODING_URL, "").strip(),
+        CONF_CALENDAR_ENTITY_IDS: entity_ids,
+        CONF_SELECTION_MODE: mode,
+    }
+    updated.pop(CONF_CALENDAR_ENTITY_ID, None)
+    if uses_legacy_uids(data):
+        updated[CONF_LEGACY_UIDS] = True
+    return updated
 
 
 class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -79,50 +141,48 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         result["next_flow"] = (FlowType.OPTIONS_FLOW, options_result["flow_id"])
         return result
 
-    async def async_step_user(self, user_input: Mapping[str, str] | None = None):
+    async def async_step_user(self, user_input: Mapping[str, Any] | None = None):
         """Handle initial setup."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            entity_id = user_input[CONF_CALENDAR_ENTITY_ID]
-            if error := _source_error(self.hass, entity_id):
+            mode, entity_ids = calendar_selection(user_input)
+            if errors := _selection_errors(self.hass, user_input):
                 return self.async_show_form(
-                    step_id="user",
-                    data_schema=_build_user_schema(user_input),
-                    errors={CONF_CALENDAR_ENTITY_ID: error},
+                    step_id="user", data_schema=_build_user_schema(user_input), errors=errors
                 )
-
-            # Prevent duplicate entries for the same source entity.
             for entry in self._async_current_entries():
-                if entry.data.get(CONF_CALENDAR_ENTITY_ID) == entity_id:
+                if _same_selection(entry.data, mode, entity_ids):
                     return self.async_abort(reason="already_configured")
 
             secret = _generate_secret()
             data = {
-                CONF_CALENDAR_ENTITY_ID: entity_id,
+                CONF_GEOCODING_URL: user_input.get(CONF_GEOCODING_URL, "").strip(),
+                CONF_CALENDAR_ENTITY_IDS: entity_ids,
+                CONF_SELECTION_MODE: mode,
                 CONF_SECRET: secret,
             }
 
             return self.async_create_entry(
-                title=_title_for_entity(entity_id),
+                title=_title_for_selection(mode, entity_ids),
                 data=data,
             )
 
         return self.async_show_form(step_id="user", data_schema=_build_user_schema(), errors=errors)
 
-    async def async_step_reconfigure(self, user_input: Mapping[str, str] | None = None):
+    async def async_step_reconfigure(self, user_input: Mapping[str, Any] | None = None):
         """Handle reconfiguration from the UI."""
         entry = self._get_reconfigure_entry()
 
         existing_secret = entry.data.get(CONF_SECRET, "")
         local_url, external_url = _build_feed_urls(self.hass, entry.entry_id, existing_secret)
         if user_input is not None:
-            selected_entity = user_input[CONF_CALENDAR_ENTITY_ID]
-            if error := _source_error(self.hass, selected_entity):
+            mode, entity_ids = calendar_selection(user_input)
+            if errors := _selection_errors(self.hass, user_input, entry.data):
                 return self.async_show_form(
                     step_id="reconfigure",
                     data_schema=_build_reconfigure_schema(entry),
-                    errors={CONF_CALENDAR_ENTITY_ID: error},
+                    errors=errors,
                     description_placeholders={
                         "url_block": _build_urls_text(local_url, external_url),
                     },
@@ -130,17 +190,13 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             for existing_entry in self._async_current_entries():
                 if (
                     existing_entry.entry_id != entry.entry_id
-                    and existing_entry.data.get(CONF_CALENDAR_ENTITY_ID) == selected_entity
+                    and _same_selection(existing_entry.data, mode, entity_ids)
                 ):
                     return self.async_abort(reason="already_configured")
 
-            updated_data = {
-                **entry.data,
-                CONF_CALENDAR_ENTITY_ID: selected_entity,
-            }
-
+            updated_data = _updated_selection(entry.data, user_input)
             new_secret = user_input.get(CONF_SECRET)
-            if new_secret:
+            if new_secret and new_secret != existing_secret:
                 if not _is_secret_valid(new_secret):
                     return self.async_show_form(
                         step_id="reconfigure",
@@ -154,7 +210,7 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             self.hass.config_entries.async_update_entry(
                 entry,
-                title=_title_for_entity(updated_data[CONF_CALENDAR_ENTITY_ID]),
+                title=_title_for_selection(mode, entity_ids),
                 data=updated_data,
             )
             await self.hass.config_entries.async_reload(entry.entry_id)
@@ -177,7 +233,7 @@ class ICalendarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class ICalendarOptionsFlow(config_entries.OptionsFlow):
     """Handle options for iCalendar API."""
 
-    async def async_step_init(self, user_input: Mapping[str, str] | None = None):
+    async def async_step_init(self, user_input: Mapping[str, Any] | None = None):
         """Manage options."""
         errors: dict[str, str] = {}
         existing_secret = self.config_entry.data.get(CONF_SECRET, "")
@@ -185,25 +241,36 @@ class ICalendarOptionsFlow(config_entries.OptionsFlow):
             self.hass, self.config_entry.entry_id, existing_secret
         )
         if user_input is not None:
+            mode, entity_ids = calendar_selection(user_input)
+            errors = _selection_errors(self.hass, user_input, self.config_entry.data)
             new_secret = user_input.get(CONF_SECRET)
-            if new_secret:
-                if not _is_secret_valid(new_secret):
-                    errors[CONF_SECRET] = "invalid_secret"
-                else:
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry,
-                        data={**self.config_entry.data, CONF_SECRET: new_secret},
-                    )
-                    await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            if new_secret and new_secret != existing_secret and not _is_secret_valid(new_secret):
+                errors[CONF_SECRET] = "invalid_secret"
+            if not errors:
+                for entry in self.hass.config_entries.async_entries(DOMAIN):
+                    if (
+                        entry.entry_id != self.config_entry.entry_id
+                        and _same_selection(entry.data, mode, entity_ids)
+                    ):
+                        errors["base"] = "already_configured"
+                        break
             if errors:
                 return self.async_show_form(
                     step_id="init",
-                    data_schema=_build_options_schema(self.config_entry),
+                    data_schema=_build_options_schema(self.config_entry, user_input),
                     errors=errors,
                     description_placeholders={
                         "url_block": _build_urls_text(local_url, external_url),
                     },
                 )
+            updated_data = _updated_selection(self.config_entry.data, user_input)
+            updated_data[CONF_SECRET] = new_secret or existing_secret
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                title=_title_for_selection(mode, entity_ids),
+                data=updated_data,
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
@@ -215,54 +282,35 @@ class ICalendarOptionsFlow(config_entries.OptionsFlow):
         )
 
 
-def _build_user_schema(user_input: Mapping[str, str] | None = None) -> vol.Schema:
-    """Build the setup schema."""
-    entity_key: object
-    if user_input and user_input.get(CONF_CALENDAR_ENTITY_ID):
-        entity_key = vol.Required(
-            CONF_CALENDAR_ENTITY_ID, default=user_input[CONF_CALENDAR_ENTITY_ID]
-        )
-    else:
-        entity_key = vol.Required(CONF_CALENDAR_ENTITY_ID)
-
-    return vol.Schema(
-        {
-            entity_key: selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["calendar", "sensor"])
-            ),
-        }
-    )
+def _build_user_schema(user_input: Mapping[str, Any] | None = None) -> vol.Schema:
+    """Build the calendar selection schema."""
+    mode, entity_ids = calendar_selection(user_input or {})
+    return vol.Schema({
+        vol.Optional(CONF_GEOCODING_URL, default=(user_input or {}).get(CONF_GEOCODING_URL, "")): str,
+        vol.Required(CONF_SELECTION_MODE, default=mode): selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[MODE_INCLUDE, MODE_EXCLUDE], translation_key="selection_mode"
+            )
+        ),
+        vol.Required(CONF_CALENDAR_ENTITY_IDS, default=entity_ids): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=["calendar", "sensor"], multiple=True)
+        ),
+    })
 
 
 def _build_reconfigure_schema(entry: config_entries.ConfigEntry) -> vol.Schema:
-    """Build reconfigure schema."""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_CALENDAR_ENTITY_ID,
-                default=entry.data.get(CONF_CALENDAR_ENTITY_ID),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["calendar", "sensor"])
-            ),
-            vol.Optional(CONF_SECRET, default=entry.data.get(CONF_SECRET, "")): str,
-        }
-    )
+    """Build reconfigure schema with legacy selection defaults."""
+    return _build_user_schema(entry.data).extend({
+        vol.Optional(CONF_SECRET, default=entry.data.get(CONF_SECRET, "")): str,
+    })
 
 
-def _build_options_schema(entry: config_entries.ConfigEntry) -> vol.Schema:
-    """Build options schema."""
-    return vol.Schema(
-        {
-            vol.Optional(CONF_SECRET, default=entry.data.get(CONF_SECRET, "")): str,
-        }
-    )
-
-
-def _source_error(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Return a config-flow error for an unavailable or unsupported source."""
-    state = hass.states.get(entity_id)
-    if state is None:
-        return "entity_not_found"
-    if not is_supported_source(entity_id, state.attributes):
-        return "entity_not_supported"
-    return None
+def _build_options_schema(
+    entry: config_entries.ConfigEntry,
+    user_input: Mapping[str, Any] | None = None,
+) -> vol.Schema:
+    """Build settings with the current selection or submitted values."""
+    data = entry.data if user_input is None else user_input
+    return _build_user_schema(data).extend({
+        vol.Optional(CONF_SECRET, default=data.get(CONF_SECRET, "")): str,
+    })
