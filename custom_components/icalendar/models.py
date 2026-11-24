@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .weekplan import AulaWeekplanHistory
+
 
 @dataclass(slots=True)
 class ICalendarRuntimeData:
@@ -11,3 +13,4 @@ class ICalendarRuntimeData:
 
     calendar_entity_id: str
     secret: str
+    weekplan: AulaWeekplanHistory | None = None

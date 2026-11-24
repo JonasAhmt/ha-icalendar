@@ -50,8 +50,9 @@ Set it in the calendar entity settings and it will be emitted as `COLOR` in the 
 - Emits calendar-level `COLOR` from Home Assistant calendar UI color settings when available.
 
 ## Data update behavior
-- Data is fetched on-demand per HTTP request from `calendar.get_events` or the selected Aula sensor.
-- Time window returned is 4 weeks of history and 52 weeks in the future.
+- Calendar entities are queried on demand for 4 weeks of history and 52 weeks ahead.
+- Aula week plans are saved as the sensor updates. The feed retains the past 4 weeks
+  across restarts and uses any available Recorder snapshots to seed a new archive.
 
 ## Use cases
 - Subscribe to Home Assistant calendars from external calendar clients that support ICS URLs.

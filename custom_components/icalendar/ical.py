@@ -18,15 +18,8 @@ from ical.calendar_stream import IcsCalendarStream
 from ical.event import Event
 
 AULA_WEEKPLAN_ATTRIBUTES = ("ugeplan", "ugeplan_next")
-AULA_WEEKDAYS = {
-    "mandag": 0,
-    "tirsdag": 1,
-    "onsdag": 2,
-    "torsdag": 3,
-    "fredag": 4,
-    "lørdag": 5,
-    "søndag": 6,
-}
+AULA_WEEKDAYS = ("mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag", "søndag")
+AULA_WEEKPLAN_SUMMARY = "Ugeplan"
 
 
 def is_supported_source(entity_id: str, attributes: Mapping[str, Any]) -> bool:
@@ -56,7 +49,7 @@ def aula_weekplan_events(
         for heading, body in zip(sections[1::2], sections[2::2], strict=False):
             heading = _html_to_text(heading).lower()
             weekday = next(
-                (index for name, index in AULA_WEEKDAYS.items() if heading.startswith(name)),
+                (index for index, name in enumerate(AULA_WEEKDAYS) if heading.startswith(name)),
                 None,
             )
             description = _html_to_text(body)
@@ -64,9 +57,13 @@ def aula_weekplan_events(
                 continue
 
             start = monday + timedelta(weeks=week_offset, days=weekday)
+            # An Aula snapshot can still contain last week's plan after midnight.
+            day_in_heading = re.match(r"\w+\s+(\d{1,2})\.", heading)
+            if day_in_heading and start.day != int(day_in_heading[1]):
+                continue
             events.append(
                 {
-                    "summary": "Ugeplan",
+                    "summary": AULA_WEEKPLAN_SUMMARY,
                     "description": description,
                     "start": start.isoformat(),
                     "end": (start + timedelta(days=1)).isoformat(),
@@ -97,15 +94,22 @@ def build_icalendar(
     calendar.calscale = "GREGORIAN"
     calendar.method = "PUBLISH"
 
+    registry_entry = er.async_get(hass).async_get(entity_id)
+    color = registry_entry.options.get("calendar", {}).get("color") if registry_entry else None
+    aula_birthday = bool(
+        registry_entry
+        and registry_entry.platform == "aula"
+        and registry_entry.unique_id.startswith("aulabirthdays")
+    )
     for ha_event in events:
-        if event := event_from_ha(entity_id, ha_event):
+        if event := event_from_ha(entity_id, ha_event, aula_birthday=aula_birthday):
             calendar.events.append(event)
 
     output = IcsCalendarStream.calendar_to_ics(calendar)
     return inject_calendar_metadata(
         output,
         calendar_name=calendar_name,
-        calendar_color=resolve_calendar_color(hass, entity_id),
+        calendar_color=normalize_calendar_color(hass, str(color) if color else None),
     )
 
 
@@ -127,7 +131,9 @@ def inject_calendar_metadata(ics: str, calendar_name: str, calendar_color: str |
     return "\r\n".join(injected) + "\r\n"
 
 
-def event_from_ha(entity_id: str, event: dict[str, Any]) -> Event | None:
+def event_from_ha(
+    entity_id: str, event: dict[str, Any], *, aula_birthday: bool = False
+) -> Event | None:
     """Convert Home Assistant event payload to an ical.Event."""
     try:
         start = parse_ha_datetime_or_date(event["start"])
@@ -152,6 +158,15 @@ def event_from_ha(entity_id: str, event: dict[str, Any]) -> Event | None:
         )
     )
 
+    # Use the source title for the UID so existing subscriptions update in place.
+    if aula_birthday:
+        if summary.startswith("🎂 "):
+            summary = f"🇩🇰 {summary.removeprefix('🎂 ')}"
+        elif ": 🎂 " in summary:
+            summary = f"🇩🇰 {summary.split(': 🎂 ', 1)[1]}"
+    elif entity_id.startswith("sensor.") and summary == AULA_WEEKPLAN_SUMMARY:
+        summary = f"{summary}, {AULA_WEEKDAYS[start.weekday()]}"
+
     return Event(
         uid=hashlib.sha256(uid.encode()).hexdigest(),
         summary=summary,
@@ -167,16 +182,6 @@ def parse_ha_datetime_or_date(value: str) -> datetime | date:
     if "T" in value:
         return datetime.fromisoformat(value)
     return datetime.strptime(value, "%Y-%m-%d").date()
-
-
-def resolve_calendar_color(hass: HomeAssistant, entity_id: str) -> str | None:
-    """Resolve calendar color from HA entity options."""
-    resolved: str | None = None
-    registry = er.async_get(hass)
-    if registry_entry := registry.async_get(entity_id):
-        if color := registry_entry.options.get("calendar", {}).get("color"):
-            resolved = str(color)
-    return normalize_calendar_color(hass, resolved)
 
 
 def normalize_calendar_color(hass: HomeAssistant, color: str | None) -> str | None:

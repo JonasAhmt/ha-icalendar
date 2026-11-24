@@ -1,5 +1,6 @@
 """Regression tests for ICS event identity and time zones."""
 
+import hashlib
 import sys
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from ical.calendar_stream import IcsCalendarStream
 from custom_components.icalendar.config_flow import _build_feed_urls
 from custom_components.icalendar.ical import (
     aula_weekplan_events,
+    build_icalendar,
     event_from_ha,
     inject_calendar_metadata,
 )
@@ -88,6 +90,36 @@ def test_aula_weekplans_become_nonempty_all_day_events() -> None:
             "end": "2026-09-10",
         },
     ]
+    event = event_from_ha("sensor.aula", events[0])
+    assert event.summary == "Ugeplan, tirsdag"
+    original_uid = "\x1f".join(("sensor.aula", events[0]["start"], events[0]["end"], "Ugeplan"))
+    assert event.uid == hashlib.sha256(original_uid.encode()).hexdigest()
+    assert aula_weekplan_events(
+        {"ugeplan": "<h3>tirsdag 1. sep.</h3>Last week"},
+        today=date(2026, 9, 7),
+    ) == []
+
+
+def test_aula_birthday_feed_formats_title_and_preserves_uid(monkeypatch) -> None:
+    """Update the published title while keeping the upstream event identity."""
+    entity_id = "calendar.fodselsdage"
+    payload = {
+        "summary": "Alex: 🎂 Sam (10)",
+        "start": "2026-09-01",
+        "end": "2026-09-02",
+    }
+    entry = SimpleNamespace(platform="aula", unique_id="aulabirthdays123", options={})
+    registry = SimpleNamespace(async_get=lambda _: entry)
+    monkeypatch.setattr("custom_components.icalendar.ical.er.async_get", lambda _: registry)
+    original = event_from_ha(entity_id, payload)
+
+    feed = build_icalendar(None, entity_id, "Birthdays", [payload])
+    assert "SUMMARY:🇩🇰 Sam (10)" in feed
+    assert f"UID:{original.uid}" in feed
+
+    entry.unique_id = "aula_events123"
+    feed = build_icalendar(None, entity_id, "Other events", [payload])
+    assert "SUMMARY:Alex: 🎂 Sam (10)" in feed
 
 
 def test_feed_url_falls_back_to_home_assistant_cloud(monkeypatch) -> None:
