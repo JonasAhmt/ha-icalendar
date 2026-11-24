@@ -8,10 +8,12 @@ from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import CONTENT_TYPE_ICAL, DOMAIN, URL_PATH_PREFIX
-from .ical import aula_weekplan_events, build_icalendar, is_supported_source
+from .ical import build_icalendar
 from .models import ICalendarRuntimeData
 
 
@@ -43,17 +45,22 @@ class ICalendarView(HomeAssistantView):
 
         entity_id = runtime_data.calendar_entity_id
         state = self.hass.states.get(entity_id)
-        if state is None:
-            return web.Response(body="404: Not Found", status=HTTPStatus.NOT_FOUND)
-        if not is_supported_source(entity_id, state.attributes):
-            return web.Response(body="403: Forbidden", status=HTTPStatus.FORBIDDEN)
-
-        if entity_id.startswith("calendar."):
+        if runtime_data.weekplan is not None:
+            events = runtime_data.weekplan.events()
+            if not events and (state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)):
+                return web.Response(body="503: Service Unavailable", status=HTTPStatus.SERVICE_UNAVAILABLE)
+            if state:
+                source_name = state.name
+            elif registry_entry := er.async_get(self.hass).async_get(entity_id):
+                source_name = registry_entry.name or registry_entry.original_name or entity_id
+            else:
+                source_name = entity_id
+            calendar_name = f"Ugeplan {source_name}"
+        elif state is not None:
             events = await self._fetch_events(entity_id)
             calendar_name = state.name
         else:
-            events = aula_weekplan_events(state.attributes)
-            calendar_name = f"Ugeplan {state.name}"
+            return web.Response(body="404: Not Found", status=HTTPStatus.NOT_FOUND)
         if events is None:
             return web.Response(body="404: Not Found", status=HTTPStatus.NOT_FOUND)
 

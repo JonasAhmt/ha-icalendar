@@ -1,7 +1,7 @@
 {
   "domain": "icalendar",
   "name": "iCalendar API",
-  "after_dependencies": ["calendar", "http"],
+  "after_dependencies": ["calendar", "http", "recorder"],
   "codeowners": ["@codyc1515", "@chris-y"],
   "config_flow": true,
   "documentation": "https://github.com/chris-y/ha-icalendar",
